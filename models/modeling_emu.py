@@ -7,12 +7,9 @@ from torch import nn
 from .causal_former import CausalFormer
 from .model import MultimodalCfg, CLIPVisionCfg, VLadapterCfg, _build_vision_tower
 from .transformer import LayerNorm
+from transformers import BeamSearchScorer, LogitsProcessorList, MinLengthLogitsProcessor, StoppingCriteriaList, \
+        MaxLengthCriteria, ContrastiveDecodingLogitsProcessor
 
-try:
-    from transformers import BeamSearchScorer, LogitsProcessorList, MinLengthLogitsProcessor, StoppingCriteriaList, \
-        MaxLengthCriteria
-except ImportError as e:
-    pass
 
 from transformers.generation.configuration_utils import GenerationConfig
 GENERATION_CONFIG = GenerationConfig(bos_token_id=1, eos_token_id=2, pad_token_id=32000)
@@ -153,9 +150,16 @@ class Emu(nn.Module):
             if image is not None:
                 image_features = image_features.reshape(-1, image_features.shape[-1])
                 inputs_embeds[img_token_idx_list] = image_features
+                blind_embeds = inputs_embeds[~img_token_idx_list]
+                blind_mask = encoder_atts[~img_token_idx_list]
 
             inputs_embeds = inputs_embeds.unsqueeze(0)
             encoder_atts = encoder_atts.unsqueeze(0)
+            blind_embeds = blind_embeds.unsqueeze(0)
+            blind_mask = blind_mask.unsqueeze(0)
+
+            blind_embeds = blind_embeds.repeat(num_beams, 1, 1)
+            blind_mask = blind_mask.repeat(num_beams, 1)
 
             outputs = self.decoder.lm.generate(
                 generation_config=GENERATION_CONFIG,
@@ -173,6 +177,7 @@ class Emu(nn.Module):
                 penalty_alpha=penalty_alpha,
                 top_k=top_k,
                 no_repeat_ngram_size=no_repeat_ngram_size,
+                logits_processor=LogitsProcessorList([ContrastiveDecodingLogitsProcessor(model=self.decoder.lm, unconditional_embeds=blind_embeds, unconditional_attention_mask=blind_mask,)]),
             )
 
             output_text = self.decoder.tokenizer.batch_decode(
